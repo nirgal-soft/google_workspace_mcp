@@ -150,24 +150,24 @@ def _handle_token_refresh_error(error: RefreshError, user_email: str, service_na
         service_display_name = f"Google {service_name.title()}"
 
         return (
-            f"**Authentication Required: Token Expired/Revoked for {service_display_name}**\n\n"
+            f"**Authentication Required: Token Expired/Revoked for {service_display_name}**\\n\\n"
             f"Your Google authentication token for {user_email} has expired or been revoked. "
-            f"This commonly happens when:\n"
-            f"- The token has been unused for an extended period\n"
-            f"- You've changed your Google account password\n"
-            f"- You've revoked access to the application\n\n"
-            f"**To resolve this, please:**\n"
-            f"1. Run `start_google_auth` with your email ({user_email}) and service_name='{service_display_name}'\n"
-            f"2. Complete the authentication flow in your browser\n"
-            f"3. Retry your original command\n\n"
-            f"The application will automatically use the new credentials once authentication is complete."
+            f"This commonly happens when:\\n"
+            f"- The token has been unused for an extended period\\n"
+            f"- You've changed your Google account password\\n"
+            f"- You've revoked access to the application\\n\\n"
+            f"**To resolve this, please:**\\n"
+            f"1. Ensure your external authentication system has provided valid tokens\\n"
+            f"2. Check that tokens are placed in /tmp/mcp-tokens/ directory\\n"
+            f"3. Retry your original command\\n\\n"
+            f"The application will automatically use external tokens when available."
         )
     else:
         # Handle other types of refresh errors
         logger.error(f"Unexpected refresh error for user {user_email}: {error}")
         return (
             f"Authentication error occurred for {user_email}. "
-            f"Please try running `start_google_auth` with your email and the appropriate service name to reauthenticate."
+            f"Please ensure your external authentication system has provided valid tokens in /tmp/mcp-tokens/."
         )
 
 
@@ -247,12 +247,42 @@ def require_google_service(
             if service is None:
                 try:
                     tool_name = func.__name__
+                    
+                    # Try to get session ID from context for external token support
+                    session_id = None
+                    try:
+                        from fastmcp.server.context import _current_context
+                        context = _current_context.get()
+                        if context and hasattr(context, 'request_context') and hasattr(context.request_context, 'session'):
+                            # Try to extract session ID from the session object
+                            session_obj = context.request_context.session
+                            logger.debug(f"[{tool_name}] Session object type: {type(session_obj)}")
+                            logger.debug(f"[{tool_name}] Session object attributes: {[attr for attr in dir(session_obj) if not attr.startswith('_')]}")
+                            if hasattr(session_obj, '_session_id'):
+                                session_id = session_obj._session_id
+                                logger.info(f"[{tool_name}] Found session_id via _session_id: {session_id}")
+                            elif hasattr(session_obj, 'session_id'):
+                                session_id = session_obj.session_id
+                                logger.info(f"[{tool_name}] Found session_id via session_id: {session_id}")
+                            elif hasattr(session_obj, 'id'):
+                                session_id = session_obj.id
+                                logger.info(f"[{tool_name}] Found session_id via id: {session_id}")
+                            # If we can't get it directly, try to generate a consistent ID from the session object
+                            elif session_obj:
+                                session_id = str(id(session_obj))
+                                logger.info(f"[{tool_name}] Using object ID as session_id: {session_id}")
+                        else:
+                            logger.debug(f"[{tool_name}] No context or session available")
+                    except Exception as e:
+                        logger.warning(f"[{tool_name}] Could not extract session_id from context: {e}")
+                    
                     service, actual_user_email = await get_authenticated_google_service(
                         service_name=service_name,
                         version=service_version,
                         tool_name=tool_name,
                         user_google_email=user_google_email,
                         required_scopes=resolved_scopes,
+                        session_id=session_id,
                     )
                     if cache_enabled:
                         cache_key = _get_cache_key(user_google_email, service_name, service_version, resolved_scopes)
@@ -331,12 +361,42 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
 
                 try:
                     tool_name = func.__name__
+                    
+                    # Try to get session ID from context for external token support
+                    session_id = None
+                    try:
+                        from fastmcp.server.context import _current_context
+                        context = _current_context.get()
+                        if context and hasattr(context, 'request_context') and hasattr(context.request_context, 'session'):
+                            # Try to extract session ID from the session object
+                            session_obj = context.request_context.session
+                            logger.debug(f"[{tool_name}] Session object type: {type(session_obj)}")
+                            logger.debug(f"[{tool_name}] Session object attributes: {[attr for attr in dir(session_obj) if not attr.startswith('_')]}")
+                            if hasattr(session_obj, '_session_id'):
+                                session_id = session_obj._session_id
+                                logger.info(f"[{tool_name}] Found session_id via _session_id: {session_id}")
+                            elif hasattr(session_obj, 'session_id'):
+                                session_id = session_obj.session_id
+                                logger.info(f"[{tool_name}] Found session_id via session_id: {session_id}")
+                            elif hasattr(session_obj, 'id'):
+                                session_id = session_obj.id
+                                logger.info(f"[{tool_name}] Found session_id via id: {session_id}")
+                            # If we can't get it directly, try to generate a consistent ID from the session object
+                            elif session_obj:
+                                session_id = str(id(session_obj))
+                                logger.info(f"[{tool_name}] Using object ID as session_id: {session_id}")
+                        else:
+                            logger.debug(f"[{tool_name}] No context or session available")
+                    except Exception as e:
+                        logger.warning(f"[{tool_name}] Could not extract session_id from context: {e}")
+                    
                     service, _ = await get_authenticated_google_service(
                         service_name=service_name,
                         version=service_version,
                         tool_name=tool_name,
                         user_google_email=user_google_email,
                         required_scopes=resolved_scopes,
+                        session_id=session_id,
                     )
 
                     # Inject service with specified parameter name

@@ -15,6 +15,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from auth.scopes import OAUTH_STATE_TO_SESSION_ID_MAP, SCOPES
 
+# Import file token storage for POC
+try:
+    from auth.file_token_storage import load_credentials_from_file_storage
+    print("Successfully imported file token storage for POC")
+except ImportError as e:
+    print(f"Failed to import file token storage: {e}")
+    load_credentials_from_file_storage = None
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -342,6 +350,21 @@ def get_credentials(
     # Check for single-user mode
     if os.getenv('MCP_SINGLE_USER_MODE') == '1':
         logger.info(f"[get_credentials] Single-user mode: bypassing session mapping, finding any credentials")
+        
+        # Try our file storage for any available session files
+        if load_credentials_from_file_storage:
+            token_dir = "/tmp/mcp-tokens"
+            if os.path.exists(token_dir):
+                for filename in os.listdir(token_dir):
+                    if filename.endswith('.json'):
+                        session_id_from_file = filename[:-5]  # Remove .json extension
+                        logger.info(f"[get_credentials] Single-user mode: trying file storage for session_id '{session_id_from_file}'")
+                        credentials = load_credentials_from_file_storage(session_id_from_file)
+                        if credentials:
+                            logger.info(f"[get_credentials] Single-user mode: SUCCESS - loaded from file storage for session '{session_id_from_file}'")
+                            return credentials
+        
+        # Fallback to original behavior
         credentials = _find_any_credentials(credentials_base_dir)
         if not credentials:
             logger.info(f"[get_credentials] Single-user mode: No credentials found in {credentials_base_dir}")
@@ -367,9 +390,22 @@ def get_credentials(
         logger.debug(f"[get_credentials] Called for user_google_email: '{user_google_email}', session_id: '{session_id}', required_scopes: {required_scopes}")
 
         if session_id:
-            credentials = load_credentials_from_session(session_id)
-            if credentials:
-                logger.debug(f"[get_credentials] Loaded credentials from session for session_id '{session_id}'.")
+            # First try file storage (our POC approach)
+            if load_credentials_from_file_storage:
+                logger.info(f"[get_credentials] Trying file storage for session_id '{session_id}'")
+                credentials = load_credentials_from_file_storage(session_id)
+                if credentials:
+                    logger.info(f"[get_credentials] SUCCESS: Loaded credentials from file storage for session_id '{session_id}'.")
+                else:
+                    logger.info(f"[get_credentials] No credentials found in file storage for session_id '{session_id}'")
+            else:
+                logger.warning("[get_credentials] File storage not available, using fallback")
+                
+            if not credentials:
+                # Fallback to in-memory session cache
+                credentials = load_credentials_from_session(session_id)
+                if credentials:
+                    logger.debug(f"[get_credentials] Loaded credentials from session for session_id '{session_id}'.")
 
         if not credentials and user_google_email:
             logger.debug(f"[get_credentials] No session credentials, trying file for user_google_email '{user_google_email}'.")
@@ -458,6 +494,7 @@ async def get_authenticated_google_service(
     tool_name: str,         # For logging/debugging
     user_google_email: str, # Required - no more Optional
     required_scopes: List[str],
+    session_id: Optional[str] = None,  # Add session_id parameter
 ) -> tuple[Any, str]:
     """
     Centralized Google service authentication for all MCP tools.
@@ -477,7 +514,7 @@ async def get_authenticated_google_service(
         GoogleAuthenticationError: When authentication is required or fails
     """
     logger.info(
-        f"[{tool_name}] Attempting to get authenticated {service_name} service. Email: '{user_google_email}'"
+        f"[{tool_name}] Attempting to get authenticated {service_name} service. Email: '{user_google_email}', Session ID: '{session_id}'"
     )
 
     # Validate email format
@@ -491,7 +528,7 @@ async def get_authenticated_google_service(
         user_google_email=user_google_email,
         required_scopes=required_scopes,
         client_secrets_path=CONFIG_CLIENT_SECRETS_PATH,
-        session_id=None,  # Session ID not available in service layer
+        session_id=session_id,  # Use provided session_id
     )
 
 
@@ -512,7 +549,7 @@ async def get_authenticated_google_service(
 
         # Generate auth URL and raise exception with it
         auth_response = await start_auth_flow(
-            mcp_session_id=None,  # Session ID not available in service layer
+            mcp_session_id=session_id,  # Use provided session_id
             user_google_email=user_google_email,
             service_name=f"Google {service_name.title()}",
             redirect_uri=redirect_uri,

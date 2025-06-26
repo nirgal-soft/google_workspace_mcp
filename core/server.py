@@ -155,8 +155,9 @@ async def oauth2_callback(request: Request) -> HTMLResponse:
         # Generic error page for any other issues during token exchange or credential saving
         return create_server_error_response(str(e))
 
-@server.tool()
-async def start_google_auth(
+# Disabled for external token testing - uncomment to re-enable OAuth flow
+# @server.tool()
+async def start_google_auth_disabled(
     user_google_email: str,
     service_name: str,
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id")
