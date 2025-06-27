@@ -105,7 +105,38 @@ def save_credentials_to_file(user_google_email: str, credentials: Credentials, b
 def save_credentials_to_session(session_id: str, credentials: Credentials):
     """Saves user credentials to the in-memory session cache."""
     _SESSION_CREDENTIALS_CACHE[session_id] = credentials
-    logger.debug(f"Credentials saved to session cache for session_id: {session_id}")
+    logger.info(f"Credentials saved to session cache for session_id: {session_id}. Valid: {credentials.valid}. Cache now has {len(_SESSION_CREDENTIALS_CACHE)} entries.")
+
+def load_credentials_from_mcp_tokens(session_id: str) -> Optional[Credentials]:
+    """Load credentials from /tmp/mcp-tokens/ directory using session ID."""
+    if not session_id:
+        return None
+        
+    token_path = f"/tmp/mcp-tokens/{session_id}.json"
+    if not os.path.exists(token_path):
+        logger.debug(f"No MCP token file found at {token_path}")
+        return None
+        
+    try:
+        with open(token_path, 'r') as f:
+            token_data = json.load(f)
+            
+        # Convert to Google Credentials format
+        credentials = Credentials(
+            token=token_data.get('access_token'),
+            refresh_token=token_data.get('refresh_token'),
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=None,  # Will be set from client secrets if needed
+            client_secret=None,  # Will be set from client secrets if needed
+            scopes=token_data.get('scopes', [])
+        )
+        
+        logger.info(f"Loaded MCP credentials from {token_path} for email: {token_data.get('email')}")
+        return credentials
+        
+    except Exception as e:
+        logger.error(f"Error loading MCP token from {token_path}: {e}")
+        return None
 
 def load_credentials_from_file(user_google_email: str, base_dir: str = DEFAULT_CREDENTIALS_DIR) -> Optional[Credentials]:
     """Loads user credentials from a file."""
@@ -144,9 +175,10 @@ def load_credentials_from_file(user_google_email: str, base_dir: str = DEFAULT_C
 
 def load_credentials_from_session(session_id: str) -> Optional[Credentials]:
     """Loads user credentials from the in-memory session cache."""
+    logger.debug(f"Loading credentials for session_id: '{session_id}'. Cache has {len(_SESSION_CREDENTIALS_CACHE)} entries: {list(_SESSION_CREDENTIALS_CACHE.keys())}")
     credentials = _SESSION_CREDENTIALS_CACHE.get(session_id)
     if credentials:
-        logger.debug(f"Credentials loaded from session cache for session_id: {session_id}")
+        logger.debug(f"Credentials loaded from session cache for session_id: {session_id}. Valid: {credentials.valid}")
     else:
         logger.debug(f"No credentials found in session cache for session_id: {session_id}")
     return credentials
@@ -366,13 +398,23 @@ def get_credentials(
 
         logger.debug(f"[get_credentials] Called for user_google_email: '{user_google_email}', session_id: '{session_id}', required_scopes: {required_scopes}")
 
+        # First try session cache
         if session_id:
             credentials = load_credentials_from_session(session_id)
             if credentials:
                 logger.debug(f"[get_credentials] Loaded credentials from session for session_id '{session_id}'.")
 
+        # Then try MCP tokens directory
+        if not credentials and session_id:
+            logger.debug(f"[get_credentials] No session credentials, trying MCP tokens for session_id '{session_id}'.")
+            credentials = load_credentials_from_mcp_tokens(session_id)
+            if credentials:
+                logger.debug(f"[get_credentials] Loaded from MCP tokens for session_id '{session_id}', caching to session.")
+                save_credentials_to_session(session_id, credentials) # Cache for current session
+
+        # Finally try user email file
         if not credentials and user_google_email:
-            logger.debug(f"[get_credentials] No session credentials, trying file for user_google_email '{user_google_email}'.")
+            logger.debug(f"[get_credentials] No MCP tokens, trying file for user_google_email '{user_google_email}'.")
             credentials = load_credentials_from_file(user_google_email, credentials_base_dir)
             if credentials and session_id:
                 logger.debug(f"[get_credentials] Loaded from file for user '{user_google_email}', caching to session '{session_id}'.")
@@ -458,6 +500,7 @@ async def get_authenticated_google_service(
     tool_name: str,         # For logging/debugging
     user_google_email: str, # Required - no more Optional
     required_scopes: List[str],
+    session_id: Optional[str] = None,  # MCP session ID for credential lookup
 ) -> tuple[Any, str]:
     """
     Centralized Google service authentication for all MCP tools.
@@ -469,6 +512,7 @@ async def get_authenticated_google_service(
         tool_name: The name of the calling tool (for logging/debugging)
         user_google_email: The user's Google email address (required)
         required_scopes: List of required OAuth scopes
+        session_id: Optional MCP session ID for credential lookup
 
     Returns:
         tuple[service, user_email] on success
@@ -477,7 +521,7 @@ async def get_authenticated_google_service(
         GoogleAuthenticationError: When authentication is required or fails
     """
     logger.info(
-        f"[{tool_name}] Attempting to get authenticated {service_name} service. Email: '{user_google_email}'"
+        f"[{tool_name}] Attempting to get authenticated {service_name} service. Email: '{user_google_email}', Session ID: '{session_id}'"
     )
 
     # Validate email format
@@ -491,13 +535,13 @@ async def get_authenticated_google_service(
         user_google_email=user_google_email,
         required_scopes=required_scopes,
         client_secrets_path=CONFIG_CLIENT_SECRETS_PATH,
-        session_id=None,  # Session ID not available in service layer
+        session_id=session_id,  # Pass through session ID for credential lookup
     )
 
 
     if not credentials or not credentials.valid:
         logger.warning(
-            f"[{tool_name}] No valid credentials. Email: '{user_google_email}'."
+            f"[{tool_name}] No valid credentials. Email: '{user_google_email}', Session ID: '{session_id}'. Credentials found: {credentials is not None}, Valid: {credentials.valid if credentials else 'N/A'}"
         )
         logger.info(
             f"[{tool_name}] Valid email '{user_google_email}' provided, initiating auth flow."
@@ -512,7 +556,7 @@ async def get_authenticated_google_service(
 
         # Generate auth URL and raise exception with it
         auth_response = await start_auth_flow(
-            mcp_session_id=None,  # Session ID not available in service layer
+            mcp_session_id=session_id,  # Pass through session ID for auth flow
             user_google_email=user_google_email,
             service_name=f"Google {service_name.title()}",
             redirect_uri=redirect_uri,
